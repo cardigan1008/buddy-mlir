@@ -25,6 +25,7 @@ from mlir.dialects import tosa, linalg, arith, tensor, math
 import copy
 import numpy
 import functools
+import torch.fx
 
 from ..graph import *
 from ..graph.graph import TensorDType
@@ -70,6 +71,53 @@ def add_op(node: AddOp, symbol_table: Dict[Tuple[str, int], ir.Operation]):
     )
     return op.result
 
+
+def add_op(
+    node: torch.fx.Node,
+    symbol_table: Dict[Tuple[str, int], ir.Operation]
+):
+    """
+    Import tensor add operation.
+    From PyTorch `aten.add` operator to MLIR arith `constant` operation.
+
+    Note: this function init an output tensor according input range.
+
+    Args:
+        node: Containing information from the input graph node.
+        symbol_table: A dictionary mapping symbols to their corresponding
+        operations.
+
+    Returns:
+        op: The operation representing the result tensor of two input nodes' add
+        result.
+    """
+    input1 = symbol_table.get((str(node.args[0]), 0))
+    dtype = str(node.meta["tensor_meta"].dtype)
+    mlir_type = mlir_element_type_get(dtype)
+    if isinstance(node.args[1], str):
+        input2 = symbol_table.get((str(node.args[1]), 0))
+    else:
+        data = [node.args[1]]
+        input2_shape = numpy.array(data).shape
+        tensor_type = ir.RankedTensorType.get(input2_shape, mlir_type)
+        element = mlir_element_attr_get(dtype, node.args[1])
+        attr = ir.DenseElementsAttr.get_splat(tensor_type, element)
+        input2 = arith.ConstantOp(tensor_type, attr).result
+    if input1 is None or input2 is None:
+        return
+    
+    shape = list(node.meta["tensor_meta"].shape)
+    if dtype == "torch.float32":
+        add_result_tensor_type = ir.RankedTensorType.get(shape, ir.F32Type.get())
+    elif dtype == "torch.bfloat16":
+        add_result_tensor_type = ir.RankedTensorType.get(shape, ir.BF16Type.get())
+    op = tosa.AddOp(
+        add_result_tensor_type,
+        input1,
+        input2,
+    )
+    return op.result
+    
 
 def arange_op(
     node: ArangeOp,
